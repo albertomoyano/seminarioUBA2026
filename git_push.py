@@ -5,7 +5,7 @@ from tkinter import Toplevel, Label, Button
 def ejecutar_git(ventana):
     try:
         subprocess.run(["git", "add", "."], check=True)
-        subprocess.run(["git", "commit", "-m", "@"], check=True)
+        subprocess.run(["git", "commit", "-m", "empuje"], check=True)
         subprocess.run(["git", "push", "-u", "origin", "main"], check=True)
         mostrar_mensaje("Proceso terminado con éxito", "Los cambios se han subido a GitHub.", ventana)
     except subprocess.CalledProcessError as e:
