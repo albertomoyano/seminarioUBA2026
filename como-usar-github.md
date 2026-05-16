@@ -187,7 +187,7 @@ Esto es importante para seguir el curso o las actividades del repositorio.
 
 ## Watch
 
-La opción **Watch** sigue todo el repositorio.
+La opción **Watch** sigue todo el repositorio para primera comunicación.
 
 Puede incluir:
 
@@ -202,7 +202,7 @@ Es útil si quieren mantenerse al tanto de toda la actividad.
 
 ## Subscribe
 
-La opción **Subscribe** sigue solamente una publicación específica.
+La opción **Subscribe** sigue de manera persistente solamente una publicación específica.
 
 Por ejemplo:
 
