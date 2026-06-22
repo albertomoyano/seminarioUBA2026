@@ -104,6 +104,44 @@ existe_fk() {
        AND CONSTRAINT_NAME='${fk}';" 2>/dev/null
 }
 
+# DEVUELVE LA CANTIDAD DE FKs QUE TIENEN A 'col' COMO COLUMNA LOCAL
+# (SIN IMPORTAR EL NOMBRE DEL CONSTRAINT). MÁS ROBUSTO QUE existe_fk
+# PORQUE EL NOMBRE PUEDE DIFERIR ENTRE MÁQUINAS (NOMBRE AUTO-GENERADO
+# POR MARIADB VS NOMBRE EXPLÍCITO).
+existe_fk_sobre_columna() {
+  local tabla="$1"; local col="$2"
+  sudo mysql -Nse "
+    SELECT COUNT(DISTINCT CONSTRAINT_NAME) FROM information_schema.KEY_COLUMN_USAGE
+     WHERE TABLE_SCHEMA='${DB_NOMBRE}'
+       AND TABLE_NAME='${tabla}'
+       AND COLUMN_NAME='${col}'
+       AND REFERENCED_TABLE_NAME IS NOT NULL;" 2>/dev/null
+}
+
+# DEVUELVE LOS NOMBRES DE LAS FKs QUE TIENEN A 'col' COMO COLUMNA LOCAL
+# (UNA POR LÍNEA), PARA ITERAR Y DROPEARLAS UNA A UNA.
+listar_fks_sobre_columna() {
+  local tabla="$1"; local col="$2"
+  sudo mysql -Nse "
+    SELECT DISTINCT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
+     WHERE TABLE_SCHEMA='${DB_NOMBRE}'
+       AND TABLE_NAME='${tabla}'
+       AND COLUMN_NAME='${col}'
+       AND REFERENCED_TABLE_NAME IS NOT NULL;" 2>/dev/null
+}
+
+# DEVUELVE LOS NOMBRES DE LOS ÍNDICES (NO-PRIMARY) QUE INCLUYEN A 'col',
+# PARA DROPEARLOS CUANDO LA FK YA NO LOS PROTEGE.
+listar_indices_sobre_columna() {
+  local tabla="$1"; local col="$2"
+  sudo mysql -Nse "
+    SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA='${DB_NOMBRE}'
+       AND TABLE_NAME='${tabla}'
+       AND COLUMN_NAME='${col}'
+       AND INDEX_NAME <> 'PRIMARY';" 2>/dev/null
+}
+
 existe_columna() {
   local tabla="$1"; local col="$2"
   sudo mysql -Nse "
@@ -141,12 +179,13 @@ echo ""
 echo "  ── A) Refinamiento del modelo ──"
 echo ""
 
-# A.1 capitulos.fk_capitulos_autor_correspondencia
-if [ "$(existe_fk capitulos fk_capitulos_autor_correspondencia)" = "1" ]; then
-  echo -e "   1. capitulos.fk_capitulos_autor_correspondencia    ${AMARILLO}presente — se eliminará${RESET}"
+# A.1 capitulos: FK(s) sobre autor_correspondencia (cualquier nombre)
+FKS_COUNT=$(existe_fk_sobre_columna capitulos autor_correspondencia)
+if [ "$FKS_COUNT" -gt "0" ]; then
+  echo -e "   1. capitulos.FK sobre autor_correspondencia        ${AMARILLO}presente (${FKS_COUNT}) — se eliminará${RESET}"
   PENDIENTES=$((PENDIENTES+1))
 else
-  echo -e "   1. capitulos.fk_capitulos_autor_correspondencia    ${VERDE}aplicado${RESET}"
+  echo -e "   1. capitulos.FK sobre autor_correspondencia        ${VERDE}aplicado${RESET}"
 fi
 
 # A.2 capitulos.autor_correspondencia (columna)
@@ -205,12 +244,13 @@ echo ""
 echo "  ── B) Purga de tablas legacy (etapa LaTeX) ──"
 echo ""
 
-# B.8 orden_taller.fk_orden_taller_metadatos_titulo
-if [ "$(existe_fk orden_taller fk_orden_taller_metadatos_titulo)" = "1" ]; then
-  echo -e "   8. orden_taller.fk_orden_taller_metadatos_titulo   ${AMARILLO}presente — se eliminará${RESET}"
+# B.8 orden_taller: FK(s) sobre titulo_ot (cualquier nombre)
+FKS_OT_COUNT=$(existe_fk_sobre_columna orden_taller titulo_ot)
+if [ "$FKS_OT_COUNT" -gt "0" ]; then
+  echo -e "   8. orden_taller.FK sobre titulo_ot                 ${AMARILLO}presente (${FKS_OT_COUNT}) — se eliminará${RESET}"
   PENDIENTES=$((PENDIENTES+1))
 else
-  echo -e "   8. orden_taller.fk_orden_taller_metadatos_titulo   ${VERDE}aplicado${RESET}"
+  echo -e "   8. orden_taller.FK sobre titulo_ot                 ${VERDE}aplicado${RESET}"
 fi
 
 # B.9 orden_taller.titulo_ot
@@ -274,36 +314,56 @@ echo ""
 echo -e "${NEGRITA}  Paso 5: Aplicando cambios${RESET}"
 echo "  ────────────────────────────────────────────────────────────────────"
 
+# ────────────────────────────────────────────────────────────────────
+# A.1 / A.1b — DROP DINÁMICO DE TODAS LAS FKs E ÍNDICES SOBRE LA COLUMNA
+# capitulos.autor_correspondencia (SIN IMPORTAR NOMBRE)
+# Se hace ANTES del heredoc porque MySQL no permite ejecutar múltiples
+# statements desde un solo PREPARE/EXECUTE.
+# ────────────────────────────────────────────────────────────────────
+
+# A.1: drop CADA FK sobre capitulos.autor_correspondencia
+while IFS= read -r FK_NAME; do
+  [ -z "$FK_NAME" ] && continue
+  echo "   • Drop FK capitulos.${FK_NAME}"
+  sudo mysql "$DB_NOMBRE" -e "ALTER TABLE capitulos DROP FOREIGN KEY \`${FK_NAME}\`;" 2>&1 \
+    | grep -v "^$" || true
+done < <(listar_fks_sobre_columna capitulos autor_correspondencia)
+
+# A.1b: drop CADA índice no-PRIMARY sobre capitulos.autor_correspondencia
+while IFS= read -r IDX_NAME; do
+  [ -z "$IDX_NAME" ] && continue
+  echo "   • Drop INDEX capitulos.${IDX_NAME}"
+  sudo mysql "$DB_NOMBRE" -e "ALTER TABLE capitulos DROP INDEX \`${IDX_NAME}\`;" 2>&1 \
+    | grep -v "^$" || true
+done < <(listar_indices_sobre_columna capitulos autor_correspondencia)
+
+# B.8: drop CADA FK sobre orden_taller.titulo_ot
+while IFS= read -r FK_NAME; do
+  [ -z "$FK_NAME" ] && continue
+  echo "   • Drop FK orden_taller.${FK_NAME}"
+  sudo mysql "$DB_NOMBRE" -e "ALTER TABLE orden_taller DROP FOREIGN KEY \`${FK_NAME}\`;" 2>&1 \
+    | grep -v "^$" || true
+done < <(listar_fks_sobre_columna orden_taller titulo_ot)
+
+# B.8b: drop CADA índice no-PRIMARY sobre orden_taller.titulo_ot
+while IFS= read -r IDX_NAME; do
+  [ -z "$IDX_NAME" ] && continue
+  echo "   • Drop INDEX orden_taller.${IDX_NAME}"
+  sudo mysql "$DB_NOMBRE" -e "ALTER TABLE orden_taller DROP INDEX \`${IDX_NAME}\`;" 2>&1 \
+    | grep -v "^$" || true
+done < <(listar_indices_sobre_columna orden_taller titulo_ot)
+
+# ────────────────────────────────────────────────────────────────────
+# RESTO DE OPERACIONES — EN UN SOLO HEREDOC TRANSACCIONAL
+# A.2, A.3, A.4, A.5, A.6, A.7, B.9, B.10/11/12
+# ────────────────────────────────────────────────────────────────────
+
 sudo mysql "$DB_NOMBRE" <<'EOSQL'
 SET FOREIGN_KEY_CHECKS = 0;
 
 -- ─────────────────────────────────────────────────────────────
 -- A) MODELO DE AUTORÍA Y CAPÍTULOS
 -- ─────────────────────────────────────────────────────────────
-
--- A.1 capitulos: drop FK fk_capitulos_autor_correspondencia (si existe)
-SET @sql = (
-  SELECT IF(COUNT(*) > 0,
-    'ALTER TABLE capitulos DROP FOREIGN KEY fk_capitulos_autor_correspondencia',
-    'SELECT 1')
-  FROM information_schema.TABLE_CONSTRAINTS
-  WHERE CONSTRAINT_SCHEMA = DATABASE()
-    AND TABLE_NAME = 'capitulos'
-    AND CONSTRAINT_NAME = 'fk_capitulos_autor_correspondencia'
-);
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
--- A.1b capitulos: drop índice asociado (si MariaDB no lo eliminó solo)
-SET @sql = (
-  SELECT IF(COUNT(*) > 0,
-    'ALTER TABLE capitulos DROP INDEX fk_capitulos_autor_correspondencia',
-    'SELECT 1')
-  FROM information_schema.STATISTICS
-  WHERE TABLE_SCHEMA = DATABASE()
-    AND TABLE_NAME = 'capitulos'
-    AND INDEX_NAME = 'fk_capitulos_autor_correspondencia'
-);
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- A.2 capitulos: drop columna autor_correspondencia (si existe)
 SET @sql = (
@@ -388,31 +448,8 @@ PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- ─────────────────────────────────────────────────────────────
 -- B) PURGA LEGACY LATEX
+-- (B.8 y B.8b YA SE EJECUTARON EN BASH ARRIBA, FUERA DEL HEREDOC)
 -- ─────────────────────────────────────────────────────────────
-
--- B.8 orden_taller: drop FK fk_orden_taller_metadatos_titulo (si existe)
-SET @sql = (
-  SELECT IF(COUNT(*) > 0,
-    'ALTER TABLE orden_taller DROP FOREIGN KEY fk_orden_taller_metadatos_titulo',
-    'SELECT 1')
-  FROM information_schema.TABLE_CONSTRAINTS
-  WHERE CONSTRAINT_SCHEMA = DATABASE()
-    AND TABLE_NAME = 'orden_taller'
-    AND CONSTRAINT_NAME = 'fk_orden_taller_metadatos_titulo'
-);
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
--- B.8b orden_taller: drop índice asociado (si MariaDB no lo eliminó solo)
-SET @sql = (
-  SELECT IF(COUNT(*) > 0,
-    'ALTER TABLE orden_taller DROP INDEX fk_orden_taller_metadatos_titulo',
-    'SELECT 1')
-  FROM information_schema.STATISTICS
-  WHERE TABLE_SCHEMA = DATABASE()
-    AND TABLE_NAME = 'orden_taller'
-    AND INDEX_NAME = 'fk_orden_taller_metadatos_titulo'
-);
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- B.9 orden_taller: drop columna titulo_ot (si existe)
 SET @sql = (
@@ -458,9 +495,9 @@ echo ""
 echo "  ── A) Refinamiento del modelo ──"
 echo ""
 
-[ "$(existe_fk capitulos fk_capitulos_autor_correspondencia)" = "0" ] \
-  && echo -e "   1. capitulos.fk_capitulos_autor_correspondencia    ${VERDE}OK${RESET}" \
-  || { echo -e "   1. capitulos.fk_capitulos_autor_correspondencia    ${ROJO}FALLA${RESET}"; TODO_OK=0; }
+[ "$(existe_fk_sobre_columna capitulos autor_correspondencia)" = "0" ] \
+  && echo -e "   1. capitulos.FK sobre autor_correspondencia        ${VERDE}OK${RESET}" \
+  || { echo -e "   1. capitulos.FK sobre autor_correspondencia        ${ROJO}FALLA${RESET}"; TODO_OK=0; }
 
 [ "$(existe_columna capitulos autor_correspondencia)" = "0" ] \
   && echo -e "   2. capitulos.autor_correspondencia                 ${VERDE}OK${RESET}" \
@@ -493,9 +530,9 @@ echo ""
 echo "  ── B) Purga de tablas legacy (etapa LaTeX) ──"
 echo ""
 
-[ "$(existe_fk orden_taller fk_orden_taller_metadatos_titulo)" = "0" ] \
-  && echo -e "   8. orden_taller.fk_orden_taller_metadatos_titulo   ${VERDE}OK${RESET}" \
-  || { echo -e "   8. orden_taller.fk_orden_taller_metadatos_titulo   ${ROJO}FALLA${RESET}"; TODO_OK=0; }
+[ "$(existe_fk_sobre_columna orden_taller titulo_ot)" = "0" ] \
+  && echo -e "   8. orden_taller.FK sobre titulo_ot                 ${VERDE}OK${RESET}" \
+  || { echo -e "   8. orden_taller.FK sobre titulo_ot                 ${ROJO}FALLA${RESET}"; TODO_OK=0; }
 
 [ "$(existe_columna orden_taller titulo_ot)" = "0" ] \
   && echo -e "   9. orden_taller.titulo_ot                          ${VERDE}OK${RESET}" \
